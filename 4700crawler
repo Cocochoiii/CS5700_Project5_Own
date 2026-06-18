@@ -6,7 +6,7 @@ import socket
 # CS 5700
 # Coco
 # Project 5 - Web Crawler
-# Level 1: connect to Fakebook over TLS and send one HTTP/1.1 request
+# Level 2: read the response into status code / headers / body, and GET /fakebook/
 
 DEFAULT_SERVER = "fakebook.khoury.northeastern.edu"
 DEFAULT_PORT = 443
@@ -19,48 +19,78 @@ class Crawler:
         self.username = args.username
         self.password = args.password
 
+        # keep for later levels: reuse one socket + hold leftover bytes
+        self.socket = None
+        self.recv_buffer = b""
+
+    def parse_response(self, data):
+        """
+        Cut one raw response into 3 parts so I can use them: the status
+        code (a number like 200 or 302), the headers (a dict of name to
+        value), and the body (the html bytes after the blank line).
+        Level 1 only print the whole blob, now I actually read it.
+        """
+        # the blank line "\r\n\r\n" split the head from the body
+        head, sep, body = data.partition(b"\r\n\r\n")
+
+        # head is bytes, turn it to text and cut into lines
+        head_text = head.decode("ascii", errors="replace")
+        lines = head_text.split("\r\n")
+
+        # first line is like "HTTP/1.1 302 Found", the middle piece is the code
+        status_line = lines[0]
+        parts = status_line.split(" ")
+        status = int(parts[1])
+
+        # the other lines are headers, each one look like "Name: Value"
+        headers = {}
+        for line in lines[1:]:
+            if ": " in line:
+                name, value = line.split(": ", 1)
+                # keep the name in lower case, easier to look up later
+                headers[name.lower()] = value
+
+        return status, headers, body
+
     def run(self):
         """
-        Level 1: open one TLS socket, send one HTTP/1.1 GET, and print
-        what come back. no link follow, no flag yet.
-        I just want to see a real answer from the server.
-        GET / give back 200 OK, a small site directory page that link to /fakebook/ and the login page.
+        Level 2: GET /fakebook/ while I am not logged in, then parse the
+        answer. /fakebook/ should reply 302 with a Location header that
+        point to the login page, because I am not log in yet.
         """
-        # build the request as one string.
-        # GET / is just to test the connection here.
-        request = "GET / HTTP/1.1\r\n"
+        # ask for /fakebook/ this time, the real crawl start page
+        request = "GET /fakebook/ HTTP/1.1\r\n"
         request += "Host: " + self.server + "\r\n"
         request += "Connection: close\r\n"
         request += "\r\n"
 
+        # print what I send, just for me to check (take out later)
         print("Request to %s:%d" % (self.server, self.port))
         print(request)
 
-        # normal TCP socket
+        # make a TCP socket and wrap it in TLS, same as Level 1
         mysocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-        # Fakebook is HTTPS on 443, so the bytes must be encrypted
-        # wrap the plain socket with TLS before connect
-        # server_hostname = the name on the cert, TLS use it to check the server
         context = ssl.create_default_context()
         mysocket = context.wrap_socket(mysocket, server_hostname=self.server)
-
-        # connect now also do the TLS handshake, because the socket is wrapped
         mysocket.connect((self.server, self.port))
-        # send the request
         mysocket.send(request.encode('ascii'))
 
-        # read all the bytes until the server close.
+        # read all the bytes until the server close, same as Level 1
         data = b""
         while True:
             part = mysocket.recv(4096)
             if len(part) == 0:
-                # 0 byte means the other side closed the connection
                 break
             data = data + part
 
-        # decode turn the bytes back to text so I can read it
-        print("Response:\n%s" % data.decode('ascii', errors='replace'))
+        # this time I do not print the whole blob, I cut it into 3 parts
+        status, headers, body = self.parse_response(data)
+
+        # show what I parsed, so I can see the code really read it
+        print("Status code: %d" % status)
+        if "location" in headers:
+            print("Location: %s" % headers["location"])
+        print("Body length: %d bytes" % len(body))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='crawl Fakebook')

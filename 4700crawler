@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+
+import argparse
+import socket
+
+# CS 5700
+# Coco
+# Project 5 - Web Crawler
+# Level 1: connect to Fakebook over TLS and send one HTTP/1.1 request
+
+DEFAULT_SERVER = "fakebook.khoury.northeastern.edu"
+DEFAULT_PORT = 443
+import ssl
+
+class Crawler:
+    def __init__(self, args):
+        self.server = args.server
+        self.port = args.port
+        self.username = args.username
+        self.password = args.password
+
+    def run(self):
+        """
+        Level 1: open one TLS socket, send one HTTP/1.1 GET, and print
+        what come back. no link follow, no flag yet.
+        I just want to see a real answer from the server.
+        GET / give back 200 OK, a small site directory page that link to /fakebook/ and the login page.
+        """
+        # build the request as one string.
+        # GET / is just to test the connection here.
+        request = "GET / HTTP/1.1\r\n"
+        request += "Host: " + self.server + "\r\n"
+        request += "Connection: close\r\n"
+        request += "\r\n"
+
+        print("Request to %s:%d" % (self.server, self.port))
+        print(request)
+
+        # normal TCP socket
+        mysocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+        # Fakebook is HTTPS on 443, so the bytes must be encrypted
+        # wrap the plain socket with TLS before connect
+        # server_hostname = the name on the cert, TLS use it to check the server
+        context = ssl.create_default_context()
+        mysocket = context.wrap_socket(mysocket, server_hostname=self.server)
+
+        # connect now also do the TLS handshake, because the socket is wrapped
+        mysocket.connect((self.server, self.port))
+        # send the request
+        mysocket.send(request.encode('ascii'))
+
+        # read all the bytes until the server close.
+        data = b""
+        while True:
+            part = mysocket.recv(4096)
+            if len(part) == 0:
+                # 0 byte means the other side closed the connection
+                break
+            data = data + part
+
+        # decode turn the bytes back to text so I can read it
+        print("Response:\n%s" % data.decode('ascii', errors='replace'))
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='crawl Fakebook')
+    parser.add_argument('-s', dest="server", type=str, default=DEFAULT_SERVER, help="The server to crawl")
+    parser.add_argument('-p', dest="port", type=int, default=DEFAULT_PORT, help="The port to use")
+    parser.add_argument('username', type=str, help="The username to use")
+    parser.add_argument('password', type=str, help="The password to use")
+    args = parser.parse_args()
+    sender = Crawler(args)
+    sender.run()

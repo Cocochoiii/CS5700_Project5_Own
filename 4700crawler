@@ -3,14 +3,14 @@
 # CS 5700
 # Coco
 # Project 5 - Web Crawler
-# Level 8: the BFS crawl loop. Keep a frontier (queue of paths to visit)
-# and a visited set (so we never visit a path twice = watch for loops).
-# For each page: fetch, parse, collect flags, queue new /fakebook/
-# links. Stop at 5 flags. Skipping non-/fakebook/ paths avoids logout.
+# Level 9: finalize. STDOUT prints ONLY the 5 flags (one per line); all
+#   progress goes to stderr. send() is robust: on a socket error, a
+#   timeout, or a half-read response, it just re-tries the request.
 
 import argparse
 import socket
 import ssl
+import sys
 from html.parser import HTMLParser
 from urllib.parse import urlencode, urljoin, urlparse
 from collections import deque
@@ -217,23 +217,32 @@ class Crawler:
 
     def send(self, request_bytes):
         """
-        Open one TLS connection, send the request, read the whole
-        response until the server close, parse it.
-        Returns (status, headers, body). pulled out so login can call it for
-        both the GET and the POST (and crawling later).
+        Send one request on a fresh TLS connection and return the parsed
+        response. Be robust to network trouble (spec: re-try on errors
+        such as the server closing the connection, or a timeout): if the
+        socket fails, times out, or the response can't be parsed (a
+        half-read body), just close up and try the whole request again.
         """
-        mysocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        context = ssl.create_default_context()
-        mysocket = context.wrap_socket(mysocket, server_hostname=self.server)
-        mysocket.connect((self.server, self.port))
-        mysocket.send(request_bytes)
-        data = b""
         while True:
-            part = mysocket.recv(4096)
-            if len(part) == 0:
-                break
-            data = data + part
-        return self.parse_response(data)
+            try:
+                mysocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                mysocket.settimeout(30)        # don't hang forever on a dead link
+                context = ssl.create_default_context()
+                mysocket = context.wrap_socket(mysocket, server_hostname=self.server)
+                mysocket.connect((self.server, self.port))
+                mysocket.send(request_bytes)
+                data = b""
+                while True:
+                    part = mysocket.recv(4096)
+                    if len(part) == 0:
+                        break
+                    data = data + part
+                mysocket.close()
+                return self.parse_response(data)
+            except (OSError, ValueError, IndexError):
+                # socket/TLS error, timeout, or a half-read response that
+                # won't parse -> just try this request again
+                continue
 
     def fetch(self, path):
         """
@@ -339,7 +348,8 @@ class Crawler:
             for flag in page_flags:
                 if flag not in flags:
                     flags.add(flag)
-                    print("found flag:", flag)    # show progress as we go
+                    # progress goes to stderr so stdout stays clean
+                    print("found flag:", flag, file=sys.stderr)
 
             for link in links:
                 # only follow /fakebook/ pages we have NOT seen yet; this
@@ -352,13 +362,14 @@ class Crawler:
 
     def run(self):
         """
-        Level 8: log in, then crawl the whole site (BFS) until we have
-        all 5 secret flags, and print them.
+        Level 9: log in, crawl until we have 5 flags, then print ONLY
+        the flags to STDOUT, one per line. All progress went to stderr,
+        so STDOUT is exactly the five flags the grader reads.
         """
         self.login()
         flags = self.crawl()
 
-        print("Done. Found %d flags:" % len(flags))
+        # STDOUT must be ONLY the flags, one per line (the spec)
         for flag in flags:
             print(flag)
 

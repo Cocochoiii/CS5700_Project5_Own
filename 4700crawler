@@ -3,16 +3,33 @@
 # CS 5700
 # Coco
 # Project 5 - Web Crawler
-# Level 4: cookie jar. Save every Set-Cookie the server sends into a dict,
-# and send them back as a Cookie header on each request.
-# this is the thing that later let me stay logged in.
+# Level 5: LOGIN. GET the login form to get a csrftoken cookie and the hidden csrfmiddlewaretoken,
+# then POST username + password + token (with Cookie + Referer + Origin).
 
 import argparse
 import socket
 import ssl
+from html.parser import HTMLParser
+from urllib.parse import urlencode
 
 DEFAULT_SERVER = "fakebook.khoury.northeastern.edu"
 DEFAULT_PORT = 443
+
+class TokenFinder(HTMLParser):
+    """
+    A HTML parser that walks the login form and grabs the value of the hidden field
+    <input name="csrfmiddlewaretoken" value="...">.
+    """
+    def __init__(self):
+        super().__init__()
+        self.token = None
+
+    def handle_starttag(self, tag, attrs):
+        # attrs is a list of (name, value) pairs for this one tag
+        if tag == "input":
+            attr = dict(attrs)
+            if attr.get("name") == "csrfmiddlewaretoken":
+                self.token = attr.get("value")
 
 class Crawler:
     def __init__(self, args):
@@ -114,47 +131,105 @@ class Crawler:
 
         return status, headers, body
 
-    def run(self):
+    def find_csrf_token(self, body):
         """
-        Level 4: GET the login page . it should reply 200 with a Set-Cookie,
-        and my cookie jar should catch it. I also attach my Cookie header
-        (empty on this first request, but the machinery is in place).
+        Run TokenFinder over the form html
+        and return the csrfmiddlewaretoken string.
         """
-        # GET the login page this time (Level 3's 302 pointed here)
-        request = "GET /accounts/login/?next=/fakebook/ HTTP/1.1\r\n"
-        request += "Host: " + self.server + "\r\n"
-        request += self.cookie_header()   # send my cookies (empty for now)
-        request += "Connection: close\r\n"
-        request += "\r\n"
+        finder = TokenFinder()
+        finder.feed(body.decode("utf-8", errors="replace"))
+        return finder.token
 
-        # print what I send, just for me to check (take out later)
-        print("Request to %s:%d" % (self.server, self.port))
-        print(request)
+    def build_get(self, path):
+        """
+        Build a GET request as bytes: request line + Host + my cookies
+        + Connection: close + blank line. reused by login and later.
+        """
+        req = "GET " + path + " HTTP/1.1\r\n"
+        req += "Host: " + self.server + "\r\n"
+        req += self.cookie_header()
+        req += "Connection: close\r\n"
+        req += "\r\n"
+        return req.encode("ascii")
 
-        # make a TCP socket and wrap it in TLS, same as Level 1
+    def build_post(self, path, fields, referer):
+        """
+        Build a POST request as bytes. the form fields become the body,
+        I tell the server Content-Length, and send Referer + Origin + my csrftoken cookie
+        so the CSRF check pass.
+        """
+        body = urlencode(fields)
+        req = "POST " + path + " HTTP/1.1\r\n"
+        req += "Host: " + self.server + "\r\n"
+        req += self.cookie_header()
+        req += "Referer: " + referer + "\r\n"
+        req += "Content-Type: application/x-www-form-urlencoded\r\n"
+        req += "Content-Length: " + str(len(body)) + "\r\n"
+        req += "Connection: close\r\n"
+        req += "\r\n"
+        req += body
+        return req.encode("ascii")
+
+    def send(self, request_bytes):
+        """
+        Open one TLS connection, send the request, read the whole
+        response until the server close, parse it.
+        Returns (status, headers, body). pulled out so login can call it for
+        both the GET and the POST (and crawling later).
+        """
         mysocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         context = ssl.create_default_context()
         mysocket = context.wrap_socket(mysocket, server_hostname=self.server)
         mysocket.connect((self.server, self.port))
-        mysocket.send(request.encode('ascii'))
-
-        # read all the bytes until the server close, same as Level 1
+        mysocket.send(request_bytes)
         data = b""
         while True:
             part = mysocket.recv(4096)
             if len(part) == 0:
                 break
             data = data + part
+        return self.parse_response(data)
 
-        # parse_response now also store any Set-Cookie into my jar
-        status, headers, body = self.parse_response(data)
+    def login(self):
+        """
+        Log in to Fakebook.
+        1) GET the login page: the server give me a csrftoken cookie (parse_response stores it)
+        and a csrfmiddlewaretoken hidden in the form.
+        2) POST username, password and that token, with the cookie + Referer + Origin.
+        """
+        login_path = "/accounts/login/?next=/fakebook/"
 
-        print("Status code: %d" % status)
-        if "location" in headers:
-            print("Location: %s" % headers["location"])
-        print("Body length: %d bytes" % len(body))
-        # show the jar, so I can see Set-Cookie really got stored
-        print("Cookies stored: %s" % self.cookies)
+        # 1) GET the login form, then pull the hidden token out of it
+        status, headers, body = self.send(self.build_get(login_path))
+        token = self.find_csrf_token(body)
+        print("CSRF token from form: %s" % token)
+
+        # 2) POST the form. all the fields go in the body, url-encoded.
+        fields = {
+            "username": self.username,
+            "password": self.password,
+            "csrfmiddlewaretoken": token,
+            "next": "/fakebook/",
+        }
+        referer = "https://" + self.server + login_path
+        status, headers, body = self.send(self.build_post(login_path, fields, referer))
+        return status, headers
+
+    def run(self):
+        """
+        Level 5: log in, then check it worked.
+        after login() I should have a sessionid cookie, and GET /fakebook/ should return 200
+        (the real homepage), not a 302 back to the login page.
+        """
+        status, headers = self.login()
+        print("Login POST status: %d" % status)     # expect 302 Found
+        print("Cookies now: %s" % self.cookies)      # expect csrftoken + sessionid
+
+        # now logged in: the homepage should load (200), not bounce me
+        # back to login (302)
+        status, headers, body = self.send(self.build_get("/fakebook/"))
+        print("GET /fakebook/ after login: %d" % status)
+        print("Homepage body length: %d bytes" % len(body))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='crawl Fakebook')

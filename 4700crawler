@@ -3,15 +3,18 @@
 # CS 5700
 # Coco
 # Project 5 - Web Crawler
-# Level 7: HTML parsing. Walk a page with html.parser to collect every
-#   <a href> link and every secret_flag. urljoin makes relative links
-#   full, then keep only same-domain links (the fakebook server).
+# Level 8: the BFS crawl loop. Keep a frontier (queue of paths to visit)
+# and a visited set (so we never visit a path twice = watch for loops).
+# For each page: fetch, parse, collect flags, queue new /fakebook/
+# links. Stop at 5 flags. Skipping non-/fakebook/ paths avoids logout.
 
 import argparse
 import socket
 import ssl
 from html.parser import HTMLParser
 from urllib.parse import urlencode, urljoin, urlparse
+from collections import deque
+
 
 DEFAULT_SERVER = "fakebook.khoury.northeastern.edu"
 DEFAULT_PORT = 443
@@ -311,26 +314,53 @@ class Crawler:
         status, headers, body = self.send(self.build_post(login_path, fields, referer))
         return status, headers
 
+    def crawl(self):
+        """
+        BFS crawl from /fakebook/.
+        frontier = a queue of paths still to visit;
+        visited = a set of paths we already did (so we never loop
+        on the same page).
+        For each page: fetch it, parse it, save flags, and queue NEW links.
+        We only follow paths that start with /fakebook/ --
+        this skips the root "/" and, importantly, the /accounts/logout/ link.
+        Stop the moment we have 5 flags.
+        """
+        frontier = deque(["/fakebook/"])
+        visited = set(["/fakebook/"])
+        flags = set()
+
+        while frontier and len(flags) < 5:
+            path = frontier.popleft()       # take the oldest path (FIFO = BFS)
+            body = self.fetch(path)
+            if body is None:
+                continue                    # 403/404 dead end, skip it
+
+            links, page_flags = self.parse_page(body, path)
+            for flag in page_flags:
+                if flag not in flags:
+                    flags.add(flag)
+                    print("found flag:", flag)    # show progress as we go
+
+            for link in links:
+                # only follow /fakebook/ pages we have NOT seen yet; this
+                # skips "/" and the dangerous /accounts/logout/
+                if link.startswith("/fakebook/") and link not in visited:
+                    visited.add(link)
+                    frontier.append(link)
+
+        return flags
+
     def run(self):
         """
-        Level 7: log in, fetch /fakebook/, then parse the page to pull
-        out the same-domain links and any secret flags. just print what
-        I found, to see the parser work before I build the crawl loop.
+        Level 8: log in, then crawl the whole site (BFS) until we have
+        all 5 secret flags, and print them.
         """
         self.login()
+        flags = self.crawl()
 
-        body = self.fetch("/fakebook/")
-        if body is None:
-            print("Could not fetch /fakebook/")
-            return
-
-        links, flags = self.parse_page(body, "/fakebook/")
-        print("Found %d same-domain links" % len(links))
-        for link in links[:10]:        # show first 10 so the output is short
-            print("  link:", link)
-        print("Found %d flags on this page" % len(flags))
+        print("Done. Found %d flags:" % len(flags))
         for flag in flags:
-            print("  FLAG:", flag)
+            print(flag)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='crawl Fakebook')

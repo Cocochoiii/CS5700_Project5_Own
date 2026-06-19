@@ -3,9 +3,9 @@
 # CS 5700
 # Coco
 # Project 5 - Web Crawler
-# Level 3: same as Level 2 (Connection: close, read until the server
-#   close), but if the body came in chunks, decode it back to real html with dechunk().
-#   now the body is always clean for later steps.
+# Level 4: cookie jar. Save every Set-Cookie the server sends into a dict,
+# and send them back as a Cookie header on each request.
+# this is the thing that later let me stay logged in.
 
 import argparse
 import socket
@@ -24,6 +24,34 @@ class Crawler:
         # keep for later levels: reuse one socket + hold leftover bytes
         self.socket = None
         self.recv_buffer = b""
+        # my cookie jar
+        self.cookies = {}
+
+    def store_cookie(self, cookie_line):
+        """
+        Take one Set-Cookie value like "csrftoken=abc; Path=/; Secure"
+        and save only the name=value part into my jar. The rest (Path,
+        Expires, Secure ...) are attributes, not the cookie itself,
+        so I drop them.
+        """
+        # the real cookie is before the first ";", attributes come after
+        first = cookie_line.split(";")[0]
+        if "=" in first:
+            name, value = first.split("=", 1)
+            self.cookies[name.strip()] = value.strip()
+
+    def cookie_header(self):
+        """
+        Build the Cookie: request header from my jar,
+        like "Cookie: name1=value1; name2=value2\r\n".
+        if the jar is empty so I add nothing.
+        """
+        if not self.cookies:
+            return ""
+        pairs = []
+        for name in self.cookies:
+            pairs.append(name + "=" + self.cookies[name])
+        return "Cookie: " + "; ".join(pairs) + "\r\n"
 
     def dechunk(self, body):
         """
@@ -50,10 +78,10 @@ class Crawler:
 
     def parse_response(self, data):
         """
-        Cut one raw response into 3 parts so I can use them: the status
-        code (a number like 200 or 302), the headers (a dict of name to
-        value), and the body (the html bytes after the blank line).
-        Level 1 only print the whole blob, now I actually read it.
+        Cut one raw response into status code, headers dict, and body.
+        Set-Cookie is special: a response may send SEVERAL of them,
+        so instead of putting it in the dict , I send each Set-Cookie to my cookie jar.
+        if the body is chunked, decode it too.
         """
         # the blank line "\r\n\r\n" split the head from the body
         head, sep, body = data.partition(b"\r\n\r\n")
@@ -72,24 +100,30 @@ class Crawler:
         for line in lines[1:]:
             if ": " in line:
                 name, value = line.split(": ", 1)
-                # keep the name in lower case, easier to look up later
-                headers[name.lower()] = value
+                name = name.lower()
+                if name == "set-cookie":
+                    # one response can send many Set-Cookie lines, store each
+                    self.store_cookie(value)
+                else:
+                    # a normal header, put it in the dict
+                    headers[name] = value
 
         # if the server sent the body in chunks, turn it back to real html
         if headers.get("transfer-encoding", "").lower() == "chunked":
             body = self.dechunk(body)
+
         return status, headers, body
 
     def run(self):
         """
-        Level 3: GET /fakebook/ while I am not logged in, so I expect a
-        302 to the login page. I read until the server close, then parse.
-        now parse_response also decode the body if it was chunked, so the
-        body length I print is the real html length.
+        Level 4: GET the login page . it should reply 200 with a Set-Cookie,
+        and my cookie jar should catch it. I also attach my Cookie header
+        (empty on this first request, but the machinery is in place).
         """
-        # ask for /fakebook/ this time, the real crawl start page
-        request = "GET /fakebook/ HTTP/1.1\r\n"
+        # GET the login page this time (Level 3's 302 pointed here)
+        request = "GET /accounts/login/?next=/fakebook/ HTTP/1.1\r\n"
         request += "Host: " + self.server + "\r\n"
+        request += self.cookie_header()   # send my cookies (empty for now)
         request += "Connection: close\r\n"
         request += "\r\n"
 
@@ -112,16 +146,15 @@ class Crawler:
                 break
             data = data + part
 
-        # cut into 3 parts; body is decoded already if it was chunked
+        # parse_response now also store any Set-Cookie into my jar
         status, headers, body = self.parse_response(data)
 
-        # show what I parsed, so I can see the code really read it
         print("Status code: %d" % status)
         if "location" in headers:
             print("Location: %s" % headers["location"])
-        if "transfer-encoding" in headers:
-            print("Transfer-Encoding: %s" % headers["transfer-encoding"])
         print("Body length: %d bytes" % len(body))
+        # show the jar, so I can see Set-Cookie really got stored
+        print("Cookies stored: %s" % self.cookies)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='crawl Fakebook')

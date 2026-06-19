@@ -3,14 +3,15 @@
 # CS 5700
 # Coco
 # Project 5 - Web Crawler
-# Level 5: LOGIN. GET the login form to get a csrftoken cookie and the hidden csrfmiddlewaretoken,
-# then POST username + password + token (with Cookie + Referer + Origin).
+# Level 6: status-code dispatch. Wrap a GET in fetch(), which follows
+#   302 (urljoin the Location), retries 503, drops 403/404, and returns
+#   the body on 200. This is the request wrapper the crawl loop will use.
 
 import argparse
 import socket
 import ssl
 from html.parser import HTMLParser
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urljoin, urlparse
 
 DEFAULT_SERVER = "fakebook.khoury.northeastern.edu"
 DEFAULT_PORT = 443
@@ -190,6 +191,35 @@ class Crawler:
             data = data + part
         return self.parse_response(data)
 
+    def fetch(self, path):
+        """
+        GET a path and handle the status code the way the spec wants:
+          200 -> return the body (good, ready to parse)
+          302 -> follow the Location header (a redirect) and try again
+          503 -> server is busy, retry the same path
+          403 / 404 (or anything else) -> give up, return None
+        We loop because 302 and 503 both mean "try again".
+        """
+        while True:
+            status, headers, body = self.send(self.build_get(path))
+            if status == 200:
+                return body
+            if status == 302:
+                # the new place is in Location; it may be relative, so
+                # urljoin it onto our current url, then keep just the path
+                location = headers.get("location", "")
+                full = urljoin("https://" + self.server + path, location)
+                parsed = urlparse(full)
+                path = parsed.path
+                if parsed.query:
+                    path = path + "?" + parsed.query
+                continue
+            if status == 503:
+                # server said it is busy; just try the same path again
+                continue
+            # 403, 404, or any other code: this url is a dead end, drop it
+            return None
+
     def login(self):
         """
         Log in to Fakebook.
@@ -217,19 +247,17 @@ class Crawler:
 
     def run(self):
         """
-        Level 5: log in, then check it worked.
-        after login() I should have a sessionid cookie, and GET /fakebook/ should return 200
-        (the real homepage), not a 302 back to the login page.
+        Level 6: log in, then fetch /fakebook/ through the new status
+        dispatcher. fetch() follows 302s, retries 503s, drops 403/404,
+        and returns the body on 200. This is what the crawl loop uses.
         """
-        status, headers = self.login()
-        print("Login POST status: %d" % status)     # expect 302 Found
-        print("Cookies now: %s" % self.cookies)      # expect csrftoken + sessionid
+        self.login()
 
-        # now logged in: the homepage should load (200), not bounce me
-        # back to login (302)
-        status, headers, body = self.send(self.build_get("/fakebook/"))
-        print("GET /fakebook/ after login: %d" % status)
-        print("Homepage body length: %d bytes" % len(body))
+        body = self.fetch("/fakebook/")
+        if body is None:
+            print("Could not fetch /fakebook/ (got 403/404)")
+        else:
+            print("Fetched /fakebook/ ok, body length: %d bytes" % len(body))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='crawl Fakebook')

@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 
-import argparse
-import socket
-
 # CS 5700
 # Coco
 # Project 5 - Web Crawler
-# Level 2: read the response into status code / headers / body, and GET /fakebook/
+# Level 3: same as Level 2 (Connection: close, read until the server
+#   close), but if the body came in chunks, decode it back to real html with dechunk().
+#   now the body is always clean for later steps.
+
+import argparse
+import socket
+import ssl
 
 DEFAULT_SERVER = "fakebook.khoury.northeastern.edu"
 DEFAULT_PORT = 443
-import ssl
 
 class Crawler:
     def __init__(self, args):
@@ -22,6 +24,29 @@ class Crawler:
         # keep for later levels: reuse one socket + hold leftover bytes
         self.socket = None
         self.recv_buffer = b""
+
+    def dechunk(self, body):
+        """
+        Decode a chunked body that I ALREADY have in full (I read until
+        the server closed, so every byte is here). The format is: a hex
+        size line, then that many data bytes, then \r\n, again and again,
+        until a size of 0. Join the data pieces = the real html. Because
+        the body is complete, I never need to recv() in here.
+        """
+        out = b""
+        buf = body
+        while True:
+            # the size line end at the first \r\n
+            line, sep, buf = buf.partition(b"\r\n")
+            # size line is hex; it may have ";extra" after it, so cut at ";" first
+            size = int(line.split(b";")[0], 16)
+            if size == 0:
+                # size 0 means I reach the end of the body
+                break
+            # take that many real bytes, then skip the \r\n after them
+            out = out + buf[:size]
+            buf = buf[size + 2:]
+        return out
 
     def parse_response(self, data):
         """
@@ -50,13 +75,17 @@ class Crawler:
                 # keep the name in lower case, easier to look up later
                 headers[name.lower()] = value
 
+        # if the server sent the body in chunks, turn it back to real html
+        if headers.get("transfer-encoding", "").lower() == "chunked":
+            body = self.dechunk(body)
         return status, headers, body
 
     def run(self):
         """
-        Level 2: GET /fakebook/ while I am not logged in, then parse the
-        answer. /fakebook/ should reply 302 with a Location header that
-        point to the login page, because I am not log in yet.
+        Level 3: GET /fakebook/ while I am not logged in, so I expect a
+        302 to the login page. I read until the server close, then parse.
+        now parse_response also decode the body if it was chunked, so the
+        body length I print is the real html length.
         """
         # ask for /fakebook/ this time, the real crawl start page
         request = "GET /fakebook/ HTTP/1.1\r\n"
@@ -83,13 +112,15 @@ class Crawler:
                 break
             data = data + part
 
-        # this time I do not print the whole blob, I cut it into 3 parts
+        # cut into 3 parts; body is decoded already if it was chunked
         status, headers, body = self.parse_response(data)
 
         # show what I parsed, so I can see the code really read it
         print("Status code: %d" % status)
         if "location" in headers:
             print("Location: %s" % headers["location"])
+        if "transfer-encoding" in headers:
+            print("Transfer-Encoding: %s" % headers["transfer-encoding"])
         print("Body length: %d bytes" % len(body))
 
 if __name__ == "__main__":

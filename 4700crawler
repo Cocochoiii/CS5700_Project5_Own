@@ -3,9 +3,9 @@
 # CS 5700
 # Coco
 # Project 5 - Web Crawler
-# Level 6: status-code dispatch. Wrap a GET in fetch(), which follows
-#   302 (urljoin the Location), retries 503, drops 403/404, and returns
-#   the body on 200. This is the request wrapper the crawl loop will use.
+# Level 7: HTML parsing. Walk a page with html.parser to collect every
+#   <a href> link and every secret_flag. urljoin makes relative links
+#   full, then keep only same-domain links (the fakebook server).
 
 import argparse
 import socket
@@ -15,6 +15,47 @@ from urllib.parse import urlencode, urljoin, urlparse
 
 DEFAULT_SERVER = "fakebook.khoury.northeastern.edu"
 DEFAULT_PORT = 443
+
+
+class PageParser(HTMLParser):
+    """
+    Walk a fakebook page and collect two things the crawler need:
+    - self.links: every <a href="..."> value (pages to maybe follow)
+    - self.flags: every secret flag. the spec say a flag look like
+      <h3 class='secret_flag' ...>FLAG: 64-chars</h3>, so when I am
+      inside such an h3 I read its text and keep the 64 chars.
+    """
+    def __init__(self):
+        super().__init__()
+        self.links = []
+        self.flags = []
+        self.in_flag = False        # True while I am inside a secret_flag h3
+
+    def handle_starttag(self, tag, attrs):
+        # attrs is a list of (name, value) pairs for this one tag
+        attr = dict(attrs)
+        # an <a href="..."> is a hyperlink (slide 7); remember its target
+        if tag == "a":
+            href = attr.get("href")
+            if href:
+                self.links.append(href)
+        # a secret flag live in <h3 class='secret_flag'>; flip a switch on
+        if tag == "h3" and "secret_flag" in (attr.get("class") or ""):
+            self.in_flag = True
+
+    def handle_endtag(self, tag):
+        # the flag text end when its h3 close
+        if tag == "h3":
+            self.in_flag = False
+
+    def handle_data(self, data):
+        # the text inside a secret_flag h3 is "FLAG: <64 chars>"; I keep
+        # only the 64 chars and drop the "FLAG: " label in front
+        if self.in_flag:
+            text = data.strip()
+            if text.startswith("FLAG: "):
+                self.flags.append(text[len("FLAG: "):])
+
 
 class TokenFinder(HTMLParser):
     """
@@ -220,6 +261,31 @@ class Crawler:
             # 403, 404, or any other code: this url is a dead end, drop it
             return None
 
+    def parse_page(self, body, base_path):
+        """
+        Parse one page's html. Return (links, flags):
+        - links: same-domain paths pulled from <a href>, ready to crawl
+        - flags: any secret flags found on this page
+        urljoin turn a relative href into a full url against the page I
+        am on; I keep only urls whose domain is my server (spec: only
+        crawl the target domain) and store them as paths.
+        """
+        parser = PageParser()
+        parser.feed(body.decode("utf-8", errors="replace"))
+
+        base = "https://" + self.server + base_path
+        links = []
+        for href in parser.links:
+            full = urljoin(base, href)
+            parsed = urlparse(full)
+            # skip links that leave my domain (e.g. facebook.com)
+            if parsed.netloc == self.server:
+                path = parsed.path
+                if parsed.query:
+                    path = path + "?" + parsed.query
+                links.append(path)
+        return links, parser.flags
+
     def login(self):
         """
         Log in to Fakebook.
@@ -247,17 +313,24 @@ class Crawler:
 
     def run(self):
         """
-        Level 6: log in, then fetch /fakebook/ through the new status
-        dispatcher. fetch() follows 302s, retries 503s, drops 403/404,
-        and returns the body on 200. This is what the crawl loop uses.
+        Level 7: log in, fetch /fakebook/, then parse the page to pull
+        out the same-domain links and any secret flags. just print what
+        I found, to see the parser work before I build the crawl loop.
         """
         self.login()
 
         body = self.fetch("/fakebook/")
         if body is None:
-            print("Could not fetch /fakebook/ (got 403/404)")
-        else:
-            print("Fetched /fakebook/ ok, body length: %d bytes" % len(body))
+            print("Could not fetch /fakebook/")
+            return
+
+        links, flags = self.parse_page(body, "/fakebook/")
+        print("Found %d same-domain links" % len(links))
+        for link in links[:10]:        # show first 10 so the output is short
+            print("  link:", link)
+        print("Found %d flags on this page" % len(flags))
+        for flag in flags:
+            print("  FLAG:", flag)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='crawl Fakebook')
